@@ -76,11 +76,15 @@ with FaceDetector.create_from_options(
                         text_to_show = "unknown face"
 
                         for name, face in faces.items():
-                            verification = DeepFace.verify(img1_path=face_crop, img2_path=face, model_name="ArcFace",
-                                                            enforce_detection=False, silent=True)
-                            if verification["verified"]:
-                                text_to_show = name
-                                break
+
+                            try:
+                                verification = DeepFace.verify(img1_path=face_crop, img2_path=face, model_name="ArcFace",
+                                                                enforce_detection=False, silent=True)
+                                if verification["verified"]:
+                                    text_to_show = name
+                                    break
+                            except ValueError:
+                                pass
 
                 else:
                     text_to_show = "too far away"
