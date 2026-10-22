@@ -27,14 +27,14 @@ def update_result(result, output_image: mediapipe.Image, timestamp_ms: int):
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-DeepFace.build_model("ArcFace")
-
 faces = {}
 for file in os.listdir(face_images_folder):
     name = os.path.splitext(file)[0]
     img = cv2.imread(os.path.join(face_images_folder, file))
     if img is not None:
         faces[name] = img
+
+DeepFace.build_model("ArcFace")
 
 cap = cv2.VideoCapture(0)
 
@@ -76,6 +76,7 @@ with FaceDetector.create_from_options(
                     if face_crop.size > 0:
 
                         text_to_show = "unknown face"
+                        face_recognized = False
 
                         for name, face in faces.items():
 
@@ -84,6 +85,7 @@ with FaceDetector.create_from_options(
                                                                 enforce_detection=False, silent=True)
                                 if verification["verified"]:
                                     text_to_show = name
+                                    face_recognized = True
                                     break
                             except ValueError:
                                 pass
@@ -94,7 +96,7 @@ with FaceDetector.create_from_options(
                 text_to_show += f"\n{distance:.2f}m"
 
                 if show_ui:
-                    color = ((0, 255, 0) if text_to_show != "unknown face" else (0, 0, 255)) if face_close_enough else (255, 0, 0)
+                    color = ((0, 255, 0) if face_recognized else (0, 0, 255)) if face_close_enough else (255, 0, 0)
                     cv2.rectangle(frame, (x, y), (x + w, y + h), color, 5)
                     cv2.putText(frame, text_to_show, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 3, color, 2)
 
