@@ -6,10 +6,9 @@ from deepface import DeepFace
 show_ui = True
 distance_constant = 100000
 close_distance_threshold = 1
-model_file_path = "blaze_face_short_range.tflite"
+# blaze_face_full_range.tflite is better and more expensive than blaze_face_full_range_sparse.tflite
+model_file_path = "blaze_face_full_range.tflite" 
 face_images_folder = "faces"
-
-os.chdir("robotics ai hackathon 2026 siemens engineers")
 
 
 
@@ -24,7 +23,7 @@ def update_result(result, output_image: mediapipe.Image, timestamp_ms: int):
     global latest_result
     latest_result = result
 
-
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 DeepFace.build_model("ArcFace")
 
@@ -88,8 +87,8 @@ with FaceDetector.create_from_options(
 
                 if show_ui:
                     color = ((0, 255, 0) if text_to_show != "unknown face" else (0, 0, 255)) if face_close_enough else (255, 0, 0)
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-                    cv2.putText(frame, text_to_show, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), color, 5)
+                    cv2.putText(frame, text_to_show, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 3, color, 2)
 
 
 
