@@ -4,8 +4,10 @@ from deepface import DeepFace
 
 
 show_ui = True
-distance_constant = 100000
-close_distance_threshold = 1
+average_face_width_meters = 0.15
+# Geschätzte Brennweite der Kamera in Pixeln
+camera_focal_length = 2000
+close_distance_threshold_meters = 1
 # blaze_face_full_range.tflite is better and more expensive than blaze_face_full_range_sparse.tflite
 model_file_path = "blaze_face_full_range.tflite" 
 face_images_folder = "faces"
@@ -62,8 +64,8 @@ with FaceDetector.create_from_options(
                 bbox = detection.bounding_box
                 x, y, w, h = bbox.origin_x, bbox.origin_y, bbox.width, bbox.height
 
-                distance = distance_constant / (bbox.width * bbox.height)
-                face_close_enough = distance <= close_distance_threshold
+                distance = camera_focal_length * average_face_width_meters / w
+                face_close_enough = distance <= close_distance_threshold_meters
 
                 if face_close_enough:
                     
@@ -88,6 +90,8 @@ with FaceDetector.create_from_options(
 
                 else:
                     text_to_show = "too far away"
+
+                text_to_show += f"\n{distance:.2f}m"
 
                 if show_ui:
                     color = ((0, 255, 0) if text_to_show != "unknown face" else (0, 0, 255)) if face_close_enough else (255, 0, 0)
