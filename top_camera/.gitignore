@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+runtime/
+archive/**/__pycache__/
+archive/**/models/*.npz
+archive/**/runtime/

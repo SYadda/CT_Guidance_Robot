@@ -1,0 +1,38 @@
+# Historical archives
+/top_camera/archive/
+
+# Local environment and runtime records
+/top_camera/.venv/
+/top_camera/venv/
+/top_camera/runtime/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Test coverage
+.coverage
+.coverage.*
+htmlcov/
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log
+
+# Local environment settings; keep example configurations
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Operating-system generated files
+.DS_Store
+Thumbs.db
+desktop.ini
