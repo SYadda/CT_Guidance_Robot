@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "status": "design_only_not_connected_to_detector",
+  "coordinate_system": "illustration_pixels_900x1160_head_at_top",
+  "clinical_thresholds": null,
+  "presets": {
+    "arms_at_sides": {
+      "required_arm_mode": "arms_at_sides",
+      "illustrative_arm_polylines": [
+        [
+          [
+            160,
+            430
+          ],
+          [
+            140,
+            539
+          ],
+          [
+            148,
+            655
+          ]
+        ],
+        [
+          [
+            294,
+            430
+          ],
+          [
+            314,
+            539
+          ],
+          [
+            306,
+            655
+          ]
+        ]
+      ]
+    },
+    "arms_overhead": {
+      "required_arm_mode": "arms_overhead",
+      "illustrative_arm_polylines": [
+        [
+          [
+            160,
+            430
+          ],
+          [
+            134,
+            299
+          ],
+          [
+            173,
+            236
+          ]
+        ],
+        [
+          [
+            294,
+            430
+          ],
+          [
+            320,
+            299
+          ],
+          [
+            281,
+            236
+          ]
+        ]
+      ]
+    }
+  }
+}

@@ -1,4 +1,4 @@
-"""Local pose geometry and patient masking for the fixed-camera demonstration.
+"""Patient-only pose geometry for the fixed-camera demonstration.
 
 No comparison with a person's silhouette. Rules use bed coordinates, joint
 angles, and distances divided by this patient's shoulder/torso dimensions.
@@ -6,11 +6,13 @@ angles, and distances divided by this patient's shoulder/torso dimensions.
 from dataclasses import dataclass
 from pathlib import Path
 import threading
+import json
 import numpy as np
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image, ImageEnhance
 
 MODEL = Path(__file__).resolve().parent / 'models' / 'pose_landmarker_full.task'
 CORE = [0, 11, 12, 23, 24, 25, 26, 27, 28]
+EXAM_PRESETS = json.loads((Path(__file__).resolve().parent/'reference_maps'/'criteria.json').read_text(encoding='utf-8'))
 
 
 def box_for(points, padding=.025):
@@ -71,7 +73,7 @@ class BedReference:
 @dataclass
 class Observation:
     points: np.ndarray
-    mask: np.ndarray
+    mask: np.ndarray | None
     size: tuple
     extra_people: bool = False
 
@@ -89,7 +91,7 @@ class PoseDetector:
                     raise RuntimeError('Pose model is missing. Run setup_demo.ps1 first.')
                 options = mp.tasks.vision.PoseLandmarkerOptions(
                     base_options=mp.tasks.BaseOptions(model_asset_path=str(MODEL)),
-                    num_poses=2, output_segmentation_masks=True,
+                    num_poses=4, output_segmentation_masks=False,
                     min_pose_detection_confidence=.3, min_pose_presence_confidence=.5)
                 self.detector = mp.tasks.vision.PoseLandmarker.create_from_options(options)
             small = image.copy(); small.thumbnail((1280,1280))
@@ -115,21 +117,22 @@ class PoseDetector:
                     p[:,2] *= a.shape[1]/small.width
                     mapped = bed.project(p)
                     center = mapped[[23,24]].mean(axis=0)
+                    # Ignore people whose hip center is outside the bed region.
+                    if not (-.10 <= center[0] <= 1.10 and -.20 <= center[1] <= 1.20):
+                        continue
                     score = float(p[CORE,3].mean())-min(float(np.linalg.norm(center-[.5,.5]))*.2, .5)
                     people.append((score, i, p))
+                if not people:
+                    continue
                 people.sort(key=lambda item:item[0],reverse=True)
                 _, i, p = people[0]
-                if not result.segmentation_masks:
-                    return None
-                mask = result.segmentation_masks[i].numpy_view().squeeze().copy()
-                mask = np.rot90(mask, -k)
                 # Ignore duplicate detections of the same patient, but block a
                 # spatially separate, confident second person.
                 center = p[[11,12,23,24],:2].mean(axis=0)
                 extent = max(np.ptp(p[CORE,:2],axis=0))
                 extra = any(np.linalg.norm(other[[11,12,23,24],:2].mean(axis=0)-center) > extent*.45
                             and other[CORE,3].mean() > .65 for _,_,other in people[1:])
-                return Observation(p, mask, image.size, extra)
+                return Observation(p, None, image.size, extra)
         return None
 
     def close(self):
@@ -138,7 +141,9 @@ class PoseDetector:
                 self.detector.close(); self.detector = None
 
 
-def evaluate_pose(observation, bed):
+def evaluate_pose(observation, bed, exam_type=None):
+    if exam_type is not None and exam_type not in EXAM_PRESETS:
+        raise ValueError('Select Head CT or Chest / Abdomen / Pelvis CT.')
     issues = []
     def issue(code, ids=None, points=None):
         region = points if points is not None else (observation.points[ids] if observation is not None and ids else bed.corners)
@@ -201,13 +206,43 @@ def evaluate_pose(observation, bed):
         down = (e_long > .08 and .35 < w_long < 1.95 and e_side < .62 and w_side < .68
                 and wrist_center*shoulder_side > 0 and abs(wrist_center) > .24
                 and np.linalg.norm(xy[w]-xy[23 if s==11 else 24])/torso < .82)
+        # A hand can stay on its own side yet rest on the chest. Check the
+        # shoulder-to-hip torso envelope, rather than only distance to midline.
+        # Finger landmarks supplement the wrist only when visible and nearby.
+        hand_ids = [w]
+        for finger in ([17,19,21] if s==11 else [18,20,22]):
+            if p[finger,3] >= .5 and p[finger,4] >= .5 and np.linalg.norm(xy[finger]-xy[w]) < width*.45:
+                hand_ids.append(finger)
+        on_torso = False
+        for hand in hand_ids:
+            t = np.dot(xy[hand]-shoulder,axis)/torso
+            if not .12 <= t <= 1.08:
+                continue
+            centerline = shoulder+(hip-shoulder)*t
+            edge = xy[s]+(xy[23 if s==11 else 24]-xy[s])*np.clip(t,0,1)
+            lateral = abs(np.dot(xy[hand]-centerline,side))/width
+            half_width = abs(np.dot(edge-centerline,side))/width
+            if lateral < half_width+.035:
+                on_torso = True
+        if on_torso:
+            down = False
+            issue(name+' hand is resting over the chest or abdomen',hand_ids)
         # Overhead: both elbow and wrist towards the head, not a sideways V.
         up = (e_long < -.14 and w_long < -.48 and e_side < 1.0 and w_side < 1.0
               and -np.dot(elbow,axis)/max(np.linalg.norm(elbow),1) > .45)
+        # Reference-map relationship: hands beyond the head, allowing bent elbows
+        # and hands close together. Nose plus a shoulder-relative margin is only
+        # an approximate head boundary, not a measured anatomical vertex.
+        if exam_type == 'body_ct':
+            up = up and np.dot(xy[w]-xy[0],axis) < -width*.12
         arm_modes.append('sides' if down else 'overhead' if up else None)
         if not (down or up): issue(name+' arm is outside the allowed position',[s,e,w])
     if all(arm_modes) and arm_modes[0] != arm_modes[1]:
         issue('Both arms must use the same position',[11,12,13,14,15,16])
+    if exam_type is not None:
+        preset = EXAM_PRESETS[exam_type]
+        if arm_modes != [preset['arm_mode']]*2:
+            issue(preset['arm_guidance'],[11,12,13,14,15,16])
     if arm_modes == ['sides','sides'] and abs(np.dot(xy[15]-xy[16],side))/width < .65:
         issue('Hands must remain beside the torso',[13,14,15,16])
     # Legs should run along the body; allow natural spacing and support pads.
@@ -229,29 +264,37 @@ def evaluate_pose(observation, bed):
     return {'ready':not issues,'pose_boxes':issues,'arm_mode':arm_modes[0] if all(arm_modes) else None}
 
 
-def patient_exclusion(observation, size):
-    # Tight segmentation, not the whole bed or a rectangular patient envelope.
-    mask = Image.fromarray((observation.mask > .35).astype('uint8')*255)
-    mask = mask.resize(size, Image.Resampling.NEAREST).filter(ImageFilter.MaxFilter(11))
-    # Shoes are often omitted from the model's mask in a bright overhead view.
-    # Extend only the narrow, joint-defined foot corridors, not the whole bed.
-    from PIL import ImageDraw
-    draw=ImageDraw.Draw(mask)
-    xy=observation.points[:,:2]*size
-    shoulder_width=np.linalg.norm((observation.points[11,:2]-observation.points[12,:2])*observation.size)
-    radius=max(3,shoulder_width*.24*size[0]/observation.size[0])
-    for knee,ankle in [(25,27),(26,28)]:
-        if observation.points[[knee,ankle],3].min()<.5:continue
-        end=xy[ankle]+.65*(xy[ankle]-xy[knee])
-        draw.line([tuple(xy[ankle]),tuple(end)],fill=255,width=max(3,int(radius*2)))
-        for x,y in (xy[ankle],end):draw.ellipse((x-radius,y-radius,x+radius,y+radius),fill=255)
-    return np.asarray(mask)>0
+def patient_result(pose):
+    """The final decision depends exclusively on the patient posture branch."""
+    ready=bool(pose['ready'])
+    reasons=list(dict.fromkeys(b['reason'] for b in pose['pose_boxes']))
+    return {'ready':ready,'status':'Within criteria' if ready else 'Outside criteria',
+            'pose_ready':ready,'scene_checked':False,'pose_boxes':pose['pose_boxes'],
+            'arm_mode':pose.get('arm_mode'),'guidance':reposition_guidance(reasons),
+            'message':' '.join(reasons)}
 
 
-def combine_checks(scene, pose):
-    ready = bool(scene['ready'] and pose['ready'])
-    reasons = list(dict.fromkeys(b['reason'] for b in pose['pose_boxes']))
-    return {**scene, 'ready':ready, 'status':'ready' if ready else 'not ready',
-            'scene_ready':bool(scene['ready']), 'pose_ready':bool(pose['ready']),
-            'pose_boxes':pose['pose_boxes'], 'arm_mode':pose.get('arm_mode'),
-            'message': ' '.join(([scene['message']] if not scene['ready'] else [])+reasons)}
+def reposition_guidance(reasons):
+    """Simple patient instructions, distinct from technical diagnostic reasons."""
+    instructions = []
+    for reason in reasons:
+        low = reason.lower()
+        if reason in [preset['arm_guidance'] for preset in EXAM_PRESETS.values()]:
+            instructions.append(reason)
+        elif 'leg' in low and 'visible' not in low:
+            instructions.append('Straighten your legs and keep them uncrossed.')
+        elif 'off the bed center' in low or 'diagonal' in low or 'direction is incorrect' in low:
+            instructions.append('Align your body with the center of the bed.')
+        elif 'raised or not lying flat' in low:
+            instructions.append('Lie flat on your back.')
+        elif 'moved' in low or 'stable' in low or 'three frames' in low:
+            instructions.append('Keep still while your position is checked.')
+        elif 'visible' in low or 'identified' in low or 'tracked' in low:
+            instructions.append('Keep your whole body and both hands visible to the camera.')
+        elif 'head / upper-body' in low:
+            instructions.append('Keep your head still and ask the technologist to check your position.')
+        elif 'outside the bed' in low:
+            instructions.append('Keep your body supported on the bed.')
+    if reasons and not instructions:
+        instructions.append('Ask the technologist to check your position and camera visibility.')
+    return list(dict.fromkeys(instructions))

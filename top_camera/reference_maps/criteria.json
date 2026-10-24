@@ -1,0 +1,14 @@
+{
+  "head_ct": {
+    "label": "Head CT",
+    "arm_mode": "sides",
+    "reference_map": "arms_at_sides.svg",
+    "arm_guidance": "Place both arms at your sides."
+  },
+  "body_ct": {
+    "label": "Chest / Abdomen / Pelvis CT",
+    "arm_mode": "overhead",
+    "reference_map": "arms_overhead.svg",
+    "arm_guidance": "Raise both arms above your head."
+  }
+}

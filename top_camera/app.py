@@ -1,4 +1,4 @@
-"""Local session calibration and room checking API."""
+"""Bed-only calibration and continuous patient posture API."""
 import argparse
 import base64
 import binascii
@@ -11,8 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 from PIL import Image, UnidentifiedImageError
 import numpy as np
-from calibration import BackgroundCalibration, read_image, jpeg, pixels
-from positioning import BedReference, PoseDetector, evaluate_pose, patient_exclusion, combine_checks, box_for
+from calibration import BedCalibration, read_image, jpeg, pixels
+from positioning import BedReference, PoseDetector, evaluate_pose, patient_result, box_for, EXAM_PRESETS
 from bed_detection import suggest_bed
 
 ROOT = Path(__file__).resolve().parent
@@ -51,6 +51,7 @@ class DemoServer(ThreadingHTTPServer):
         self.storage.mkdir(parents=True,exist_ok=True)
         self.lock = threading.RLock()
         self.pending = None
+        self.monitoring = {}
         self.active = None
         self.active_id = None
         self.created_at = None
@@ -63,56 +64,61 @@ class DemoServer(ThreadingHTTPServer):
                     'bed_corners':self.bed.corners if self.bed else None}
 
     def confirm(self,body):
-        if body.get('empty_room_confirmed') is not True:
-            raise ValueError('Confirm that the room is empty before using the baseline.')
         with self.lock:
             pending = self.pending
             if not pending or body.get('candidate_id') != pending['id'] or time.monotonic()-pending['time'] > 300:
-                raise Conflict('The baseline preview expired or was replaced. Capture it again.')
-            baseline = BackgroundCalibration.create(pending['images'],pending['camera'],body.get('ignored_regions',[]))
+                raise Conflict('The bed preview expired or was replaced. Capture it again.')
+            bed_calibration = BedCalibration(pending['camera'],pending['images'][0].size)
             if body.get('bed_confirmed') is not True:
-                raise ValueError('Confirm the yellow bed outline before using the baseline.')
+                raise ValueError('Confirm the yellow bed outline before monitoring.')
             bed = BedReference(body.get('bed_corners'),pending['images'][0].size)
-            # Keep ignored areas separate from the patient's bed.
-            from PIL import ImageDraw
-            bed_mask = Image.new('1',baseline.mask.shape[::-1])
-            ImageDraw.Draw(bed_mask).polygon([(x*bed_mask.width,y*bed_mask.height) for x,y in bed.corners],fill=1)
-            occupied = np.asarray(bed_mask,dtype=bool)
-            if ((~baseline.mask)&occupied).sum() > occupied.sum()*.10:
-                raise ValueError('Ignored areas must not cover the bed. Clear them and mark again.')
             identifier = uuid.uuid4().hex
-            preview = Image.fromarray((baseline.reference*255).astype('uint8'))
-            # Persist before publishing the new active baseline. Old baseline remains on failure.
-            (self.storage/'baseline.jpg').write_bytes(jpeg(preview))
-            metadata = {'calibration_id':identifier,'camera':baseline.camera,'ignored_regions':baseline.ignored_regions,
-                        'created_at':time.time(),'empty_room_confirmed':True,'frames':5,'bed_corners':bed.corners}
-            (self.storage/'baseline.json').write_text(json.dumps(metadata,indent=2),encoding='utf-8')
-            self.active,self.active_id,self.created_at = baseline,identifier,metadata['created_at']
+            preview = pending['images'][0]
+            # Persist before publishing the new bed calibration. Previous calibration remains on failure.
+            (self.storage/'bed_reference.jpg').write_bytes(jpeg(preview))
+            metadata = {'calibration_id':identifier,'camera':bed_calibration.camera,
+                        'created_at':time.time(),'patient_only':True,'frames':5,'bed_corners':bed.corners}
+            (self.storage/'bed_reference.json').write_text(json.dumps(metadata,indent=2),encoding='utf-8')
+            self.active,self.active_id,self.created_at = bed_calibration,identifier,metadata['created_at']
             self.bed = bed
+            self.monitoring.clear()
             self.pending = None
             return self.state()
 
-    def inspect(self, images):
-        poses, observations = [], []
-        try:
-            for image in images:
+    def inspect(self, images, exam_type=None, monitor_id=None):
+        # Infer only new frames. Keep at most three observations per monitoring
+        # session; no image buffers or repeated inference on historical frames.
+        records = []
+        now = time.monotonic()
+        if monitor_id is not None:
+            key = (monitor_id, exam_type, self.active_id)
+            self.monitoring = {k:v for k,v in self.monitoring.items() if now-v[0] < 3}
+            records = list(self.monitoring.get(key,(now,[]))[1])
+        for image in images:
+            try:
                 observation = self.pose_detector.observe(image,self.bed)
-                observations.append(observation)
-                poses.append(evaluate_pose(observation,self.bed))
-        except (ImportError,RuntimeError,OSError,ValueError):
-            # Model failure cannot turn an empty/background-only scene green.
-            import logging
-            logging.exception('Patient analysis failed')
-            observations = [None]*len(images)
-            poses = [{'ready':False,'pose_boxes':[{'reason':'Patient analysis unavailable. Check local model and dependencies.',
-                       **box_for(self.bed.corners)}],'arm_mode':None} for _ in images]
-        pose = poses[-1]
-        if len(images) < 3:
+                pose = evaluate_pose(observation,self.bed,exam_type)
+            except (ImportError,RuntimeError,OSError,ValueError):
+                import logging
+                logging.exception('Patient analysis failed')
+                observation = None
+                pose = {'ready':False,'pose_boxes':[{'reason':'Patient analysis unavailable. Check local model and dependencies.',
+                        **box_for(self.bed.corners)}],'arm_mode':None}
+            records.append((observation,pose))
+        records = records[-3:]
+        if monitor_id is not None:
+            if len(self.monitoring) >= 16 and key not in self.monitoring:
+                self.monitoring.pop(next(iter(self.monitoring)))
+            self.monitoring[key] = (time.monotonic(),records)
+        observations = [r[0] for r in records]
+        poses = [r[1] for r in records]
+        pose = {**poses[-1], 'pose_boxes':list(poses[-1]['pose_boxes'])}
+        if len(records) < 3:
             pose['pose_boxes'].append({'reason':'Capture three frames to verify that the patient is still.',**box_for(self.bed.corners)})
         elif observations[-1] is not None and sum(o is not None for o in observations)>=2:
             selected = [0,11,12,13,14,15,16,23,24,25,26,27,28]
             for earlier in observations[:-1]:
-                if earlier is None:continue
+                if earlier is None: continue
                 current = observations[-1]
                 q = current.points[:,:2]*current.size
                 r = earlier.points[:,:2]*earlier.size
@@ -126,23 +132,11 @@ class DemoServer(ThreadingHTTPServer):
         else:
             pose['pose_boxes'].append({'reason':'Patient could not be tracked throughout capture.',**box_for(self.bed.corners)})
         pose['ready'] = not pose['pose_boxes']
-        scene_results = []
-        for image,observation in zip(images,observations):
-            excluded = None
-            if observation is not None:
-                excluded = patient_exclusion(observation,self.active.mask.shape[::-1])
-                fraction = float(excluded.mean())
-                if not .005 < fraction < .60:
-                    pose['ready'] = False
-                    pose['pose_boxes'].append({'reason':'Patient segmentation is uncertain.',**box_for(self.bed.corners)})
-                    excluded = None
-            scene_results.append(self.active.predict(image,excluded))
-        scene = scene_results[-1]
-        if len(scene_results)>=3 and sum(result['ready'] for result in scene_results)<2:
-            scene['ready'] = False
-            if not scene['anomaly_boxes']:
-                scene['message'] = 'The scene changed during capture. Hold still and check again.'
-        return combine_checks(scene,pose)
+        result = patient_result(pose)
+        if exam_type is not None:
+            result.update(exam_type=exam_type,reference_map=EXAM_PRESETS[exam_type]['reference_map'])
+        result['observed_at'] = time.time()
+        return result
 
     def server_close(self):
         self.pose_detector.close()
@@ -219,20 +213,30 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200,{'candidate_id':identifier,'preview':'data:image/jpeg;base64,'+base64.b64encode(jpeg(preview)).decode(),
                                 'bed_corners':suggestion})
                 return
+            exam_type = body.get('exam_type')
+            if exam_type not in EXAM_PRESETS:
+                raise ValueError('Select Head CT or Chest / Abdomen / Pelvis CT.')
+            monitor_id = body.get('monitor_id')
+            if monitor_id is not None and (not isinstance(monitor_id,str) or not 1 <= len(monitor_id) <= 80):
+                raise ValueError('Invalid monitoring session.')
             count = len(body.get('images',[]))
             if count not in (1,3):
                 raise ValueError('Provide one review image or three camera frames.')
+            if monitor_id is not None and count != 1:
+                raise ValueError('Monitoring requires one new frame per request.')
             images = decode_images(body,count)
             image = images[-1]
             with self.server.lock:
                 if self.server.active is None:
-                    raise Conflict('Calibrate the empty room before checking.')
+                    raise Conflict('Calibrate the bed before monitoring.')
                 if body.get('calibration_id') != self.server.active_id:
                     raise Conflict('The calibration changed. Reload the page and calibrate again.')
                 if camera != self.server.active.camera:
                     raise Conflict('The camera or capture resolution changed. Calibrate again.')
+                if any(im.size != self.server.active.image_size for im in images):
+                    raise Conflict('Capture size changed. Calibrate the bed again.')
                 start = time.perf_counter()
-                result = self.server.inspect(images)
+                result = self.server.inspect(images,exam_type,monitor_id)
                 result.update(calibration_id=self.server.active_id,elapsed_ms=round((time.perf_counter()-start)*1000))
                 self.server.save_check(image,result)
                 self.reply(200,result)
@@ -246,11 +250,11 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--port',type=int,default=8000)
+    parser.add_argument('--port',type=int,default=8001)
     parser.add_argument('--storage',type=Path,default=None)
     args = parser.parse_args()
     with DemoServer(('127.0.0.1',args.port),storage=args.storage) as server:
-        print(f'Room calibration demo: http://localhost:{args.port}',flush=True)
+        print(f'Patient-only monitoring: http://localhost:{args.port}',flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
