@@ -1,5 +1,9 @@
 # Historical archives
+/archive/
 /top_camera/archive/
+
+# Temporary development output
+/tmp/
 
 # Local environment and runtime records
 /top_camera/.venv/
